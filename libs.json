@@ -1,9 +1,10 @@
 {
     "premake-osx": {
         "build-platforms": [
-            "osx"
+            "osx-x64",
+            "osx-arm"
         ],
-        "lib": "premake-5.0.0-alpha13-macosx",
+        "lib": "premake-5.0.0-alpha15-macosx",
         "role": "premake5"
     },
     "premake-win": {
@@ -19,5 +20,14 @@
         ],
         "lib": "premake-5.0.0-alpha15-linux",
         "role": "premake5"
+    },
+    "metal-cpp-osx": {
+        "build-platforms": [
+            "osx-x64",
+            "osx-arm"
+        ],
+        "lib": "metal-cpp-2020-11-macosx",
+        "role": "metalcpp"
     }
+
 }

@@ -46,7 +46,8 @@ struct tm_the_truth_api *tm_the_truth_api;
 struct tm_os_display_api *tm_os_display_api;
 struct tm_os_window_api *tm_os_window_api;
 
-extern void tm_path_tracing_app_load_plugin(struct tm_api_registry_api *reg, bool load);
+extern void main_app_load_plugin(struct tm_api_registry_api *reg, bool load);
+extern void load_metal_adder(struct tm_api_registry_api *reg, bool load);
 
 TM_DLL_EXPORT void tm_load_plugin(struct tm_api_registry_api *reg, bool load)
 {
@@ -73,5 +74,7 @@ TM_DLL_EXPORT void tm_load_plugin(struct tm_api_registry_api *reg, bool load)
     tm_os_display_api = tm_get_api(reg, tm_os_display_api);
     tm_os_window_api = tm_get_api(reg, tm_os_window_api);
 
-    tm_path_tracing_app_load_plugin(reg, load);
+    load_metal_adder(reg, load);
+    main_app_load_plugin(reg, load);
+
 }

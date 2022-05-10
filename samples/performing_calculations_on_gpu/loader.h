@@ -5,6 +5,7 @@
 extern struct tm_api_registry_api *tm_global_api_registry;
 
 extern struct tm_allocator_api *tm_allocator_api;
+extern struct tm_application_api *tm_application_api;
 extern struct tm_buffer_format_api *tm_buffer_format_api;
 extern struct tm_camera_api *tm_camera_api;
 extern struct tm_error_api *tm_error_api;

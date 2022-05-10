@@ -1,5 +1,7 @@
 #include "loader.h"
 
+#include "metal_adder.h"
+
 #include <foundation/allocator.h>
 #include <foundation/api_registry.h>
 #include <foundation/application.h>
@@ -29,12 +31,7 @@
 #include <unistd.h>
 #endif
 
-#if defined(TM_OS_WINDOWS)
-#include <ShellScalingAPI.h>
-#define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
-#endif
-
+struct metal_adder_api *metal_adder_api;
 
 typedef struct frame_parameters_t
 {
@@ -45,13 +42,6 @@ typedef struct frame_parameters_t
 } frame_parameters_t;
 
 enum { MAX_DEVICES = 8 };
-
-typedef struct window_t
-{
-    tm_window_o *window;
-    uint32_t swap_chain_resolution[2];
-} window_t;
-
 struct tm_application_o
 {
     tm_allocator_i allocator;
@@ -62,7 +52,6 @@ struct tm_application_o
 
     frame_parameters_t frame_parameters;
 
-    window_t window;
     tm_color_space_desc_t color_space;
 
     uint64_t next_input_event;
@@ -71,35 +60,12 @@ struct tm_application_o
 
     uint64_t reload_count;
 
-    uint64_t os_dialog_show_count;
+    struct metal_adder_o *metal_adder;
+
 };
 
 #define TM_RUNNING_APPLICATION_STATIC_VARIABLE TM_STATIC_HASH("tm_running_application_static_variable", 0x1d288e6042152ac8ULL)
 tm_application_o **running_application_ptr;
-
-
-static window_t *create_window(tm_application_o *app, tm_rect_t r, bool center_on_screen, bool maximize)
-{
-    window_t *win = &app->window;
-
-    enum tm_os_window_style window_style = TM_OS_WINDOW_STYLE_CUSTOM_BORDER;
-    if (center_on_screen)
-        window_style |= TM_OS_WINDOW_STYLE_CENTERED;
-
-    win->window = tm_os_window_api->create_window(TM_LOCALIZE("Playground"), r, window_style, 0);
-    tm_os_window_api->set_border_metrics(win->window, (tm_os_window_border_metrics_t){ 3.0f, 30.0f });
-
-    if (maximize)
-        tm_os_window_api->set_window_state(win->window, TM_OS_WINDOW_STATE_MAXIMIZE);
-
-    tm_window_platform_data_o platform_win = tm_os_window_api->platform_data(win->window);
-    (void)platform_win;
-    const tm_rect_t rect = tm_os_window_api->rect(win->window);
-    win->swap_chain_resolution[0] = (uint32_t)rect.w;
-    win->swap_chain_resolution[1] = (uint32_t)rect.h;
-
-    return win;
-}
 
 
 static tm_the_truth_o *setup_the_truth(tm_allocator_i *allocator)
@@ -107,58 +73,9 @@ static tm_the_truth_o *setup_the_truth(tm_allocator_i *allocator)
     return tm_the_truth_api->create(allocator, TM_THE_TRUTH_CREATE_TYPES_ALL);
 }
 
-static void setup_initial_window(tm_application_o *app)
-{
-    TM_PROFILER_BEGIN_FUNC_SCOPE();
-
-    // Hard coded initial window size and position.
-    // TODO: Figure out best practice for first-time boot up of editor.
-    tm_rect_t rect = { 100, 100, 1920, 1000 };
-
-    // Grab the dpi scale factor, width and height for the display that holds the window center.
-    const tm_vec2_t c = tm_rect_center(rect);
-    float dpi_scale_factor = 1.f;
-    tm_rect_t display_rect = { .w = FLT_MAX, .h = FLT_MAX };
-    const uint32_t n_connected_displays = tm_os_display_api->num_displays();
-    for (uint32_t i = 0; i != n_connected_displays; ++i) {
-        tm_display_o *display = tm_os_display_api->display(i);
-        const tm_rect_t drect = tm_os_display_api->os_display_rect(display);
-        if (c.x >= drect.x && c.x < (drect.x + drect.w) && c.y >= drect.y && c.y < (drect.y + drect.h)) {
-            dpi_scale_factor = tm_os_display_api->os_display_dpi_scale_factor(display);
-            display_rect = drect;
-            break;
-        }
-    }
-
-    // Adjust window rect to display scale factor.
-    rect = tm_os_window_api->adjust_rect(rect, dpi_scale_factor, TM_OS_WINDOW_ADJUST_RECT_TO_PIXELS);
-
-    const bool maximize = rect.w >= display_rect.w || rect.h >= display_rect.h;
-
-    // Clamp width and height to display size.
-    rect.w = tm_min(rect.w, display_rect.w);
-    rect.h = tm_min(rect.h, display_rect.h);
-
-    create_window(app, rect, true, maximize);
-
-    TM_PROFILER_END_FUNC_SCOPE();
-}
-
-static void check_swapchain_resize(tm_application_o *app)
-{
-    window_t *win = &app->window;
-
-    tm_rect_t rect = tm_os_window_api->rect(win->window);
-    if ((uint32_t)rect.w != win->swap_chain_resolution[0] || (uint32_t)rect.h != win->swap_chain_resolution[1]) {
-    }
-}
-
 static bool tick_application(tm_application_o *app)
 {
     TM_PROFILER_BEGIN_FUNC_SCOPE();
-
-    const tm_window_status_t win_status = tm_os_window_api->status(app->window.window);
-    tm_unused(win_status);
 
     tm_temp_allocator_api->tick_frame();
     tm_the_truth_api->garbage_collect(app->tt);
@@ -176,58 +93,9 @@ static bool tick_application(tm_application_o *app)
     app->frame_parameters.smooth_delta = smooth_delta_weight * delta + (1 - smooth_delta_weight) * app->frame_parameters.smooth_delta;
     app->frame_parameters.clock = now;
     app->frame_parameters.time += delta;
+    app->exit = true;
 
-    // Run message pump for all window
-    const uint64_t os_dialog_show_count = tm_os_api->dialogs->show_count();
-    const bool os_dialog_shown = os_dialog_show_count != app->os_dialog_show_count;
-    app->os_dialog_show_count = os_dialog_show_count;
-    if (os_dialog_shown) {
-        // Clear event queue.
-        while (true) {
-            tm_input_event_t events[32];
-            const uint64_t n = tm_input_api->events(app->next_input_event, events, 32);
-            app->next_input_event += n;
-            if (n < 32)
-                break;
-        }
-    }
-    /*tm_os_window_api->wait();*/
-    tm_os_window_api->update_window(app->window.window);
-    /*if (tm_os_window_api->update_window(app->window.window).focus_changed || os_dialog_shown)*/
-        /*tm_ui_api->release_held_state(app->window.ui);*/
-
-    if (tm_os_window_api->has_user_requested_close(app->window.window, true))
-        return false;
-
-    // Process input
-    while (true) {
-        tm_input_event_t events[32];
-        uint64_t n = tm_input_api->events(app->next_input_event, events, 32);
-        /*if (win_status.has_focus)*/
-            /*feed_events_editor_gui(app, events, (uint32_t)n);*/
-        /*else {*/
-            /*for (const tm_input_event_t *e = events; e != events + n; ++e) {*/
-                /*if (!e->type)*/
-                    /*continue;*/
-                /*const uint32_t ct = e->source->controller_type;*/
-
-                /*// Always feed mouse position to track it.*/
-                /*if (ct == TM_INPUT_CONTROLLER_TYPE_MOUSE && e->item_id == TM_INPUT_MOUSE_ITEM_POSITION)*/
-                    /*feed_events_editor_gui(app, e, 1);*/
-
-                /*// Feed mouse events to window under cursor for drag/drop management.*/
-                /*else if (win_status.is_under_cursor && ct == TM_INPUT_CONTROLLER_TYPE_MOUSE)*/
-                    /*feed_events_editor_gui(app, e, 1);*/
-            /*}*/
-        /*}*/
-        app->next_input_event += n;
-        if (n < 32)
-            break;
-    }
-
-
-    // Update UI and handle window resizes
-    check_swapchain_resize(app);
+    metal_adder_api->send_compute_command(app->metal_adder);
 
     return TM_PROFILER_END_FUNC_SCOPE_WITH(!app->exit);
 }
@@ -281,7 +149,7 @@ static tm_application_o *create_application(int argc, char **argv)
     tm_application_o *app = tm_alloc(&a, sizeof(*app));
     *app = (tm_application_o){
         .allocator = a,
-        .color_space = TM_COLOR_SPACE_DEFAULT_SDR
+        .color_space = TM_COLOR_SPACE_DEFAULT_SDR,
     };
     *running_application_ptr = app;
 
@@ -295,10 +163,9 @@ static tm_application_o *create_application(int argc, char **argv)
     app->data_dir = tm_alloc(&app->allocator, data_dir_len);
     memcpy(app->data_dir, data_dir, data_dir_len);
 
-    setup_initial_window(app);
-
     app->frame_parameters.clock = tm_os_api->time->now();
     /*app->simple_draw = init_simple_draw(&app->allocator, app->tt);*/
+    app->metal_adder = metal_adder_api->init(&app->allocator, app->data_dir);
 
     TM_SHUTDOWN_TEMP_ALLOCATOR(ta);
 
@@ -311,10 +178,8 @@ static void destroy_application(tm_application_o *app)
 {
 
     /*shutdown_simple_draw(app->simple_draw);*/
-
+    metal_adder_api->shutdown(app->metal_adder);
     tm_free(&app->allocator, app->data_dir, strlen(app->data_dir) + 1);
-
-    tm_os_window_api->destroy_window(app->window.window);
 
     tm_the_truth_api->destroy(app->tt);
 
@@ -346,9 +211,11 @@ struct tm_application_api *tm_application_api = &(struct tm_application_api){
 };
 
 
-void tm_path_tracing_app_load_plugin(struct tm_api_registry_api *reg, bool load)
+void main_app_load_plugin(struct tm_api_registry_api *reg, bool load)
 {
     running_application_ptr = reg->static_variable(TM_RUNNING_APPLICATION_STATIC_VARIABLE, sizeof(tm_application_o *), __FILE__, __LINE__);
+
+    metal_adder_api = tm_get_api(reg, metal_adder_api);
 
     tm_set_or_remove_api(reg, load, tm_application_api, tm_application_api);
 }
